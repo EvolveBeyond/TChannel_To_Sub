@@ -5,9 +5,9 @@ import logging
 # logging.basicConfig(level=logging.INFO) # Configure in main bot.py or scheduled_update.py
 
 FORMAT_MAP = {
-    'vmess': 'v2rayNG',
-    'vless': 'hiddify',
-    'trojan': 'trojan', # Changed from 'npv' for more general name
+    'vmess': 'vmess',       # Changed from 'v2rayNG'
+    'vless': 'vless',       # Changed from 'hiddify'
+    'trojan': 'trojan',
     'ss': 'shadowsocks',
     'ssr': 'shadowsocksr',
     'tuic': 'tuic',
@@ -71,27 +71,64 @@ def build_sub_files(links: List[str], output_dir: str):
         return
 
 
-    logging.info(f"Building {len(classified_buckets)} subscription file(s) in directory: {output_dir}")
+    logging.info(f"Building individual subscription files in directory: {output_dir}")
+
+    all_known_protocol_links = [] # For creating an aggregated file
 
     for format_name, link_list in classified_buckets.items():
         if not link_list:
-            continue # Should not happen due to setdefault logic
+            continue
 
         file_path = os.path.join(output_dir, f"{format_name}.txt")
 
         try:
             content = "\n".join(link_list)
-            # Ensure a final newline, as many tools/parsers expect it.
             if content and not content.endswith('\n'):
                 content += '\n'
-            # If content is empty (e.g. empty list of links somehow), write an empty file with a newline.
-            elif not content:
+            elif not content: # Handles empty link_list for a format
                 content = '\n'
 
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.write(content)
             logging.info(f"Successfully wrote {len(link_list)} links to {file_path}")
+
+            # If this format_name came from an explicit FORMAT_MAP key (not DEFAULT_FORMAT_KEY),
+            # add its links to the all_known_protocol_links list.
+            # We check if format_name is one of the values in FORMAT_MAP.
+            if format_name in FORMAT_MAP.values():
+                 all_known_protocol_links.extend(link_list)
+
         except IOError as e:
             logging.error(f"IOError writing to file {file_path}: {e}")
         except Exception as e:
             logging.error(f"An unexpected error occurred while writing {file_path}: {e}")
+
+    # Create the all_proxies.txt file
+    if all_known_protocol_links:
+        # Deduplicate again in case a link somehow appeared in multiple specific categories that map to same output file
+        unique_overall_links = sorted(list(set(all_known_protocol_links)))
+        all_proxies_path = os.path.join(output_dir, "all_proxies.txt")
+        try:
+            content = "\n".join(unique_overall_links)
+            if content and not content.endswith('\n'):
+                content += '\n'
+            elif not content: # Should not happen if all_known_protocol_links is not empty
+                content = '\n'
+
+            with open(all_proxies_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            logging.info(f"Successfully wrote {len(unique_overall_links)} links to {all_proxies_path}")
+        except IOError as e:
+            logging.error(f"IOError writing to file {all_proxies_path}: {e}")
+        except Exception as e:
+            logging.error(f"An unexpected error occurred while writing {all_proxies_path}: {e}")
+    else:
+        logging.info("No links from known protocols to aggregate for all_proxies.txt.")
+        # Optionally, create an empty all_proxies.txt
+        all_proxies_path = os.path.join(output_dir, "all_proxies.txt")
+        try:
+            with open(all_proxies_path, 'w', encoding='utf-8') as f:
+                f.write('\n') # Write an empty file with a newline
+            logging.info(f"Created empty {all_proxies_path} as no known protocol links were found.")
+        except IOError as e:
+            logging.error(f"IOError writing empty {all_proxies_path}: {e}")

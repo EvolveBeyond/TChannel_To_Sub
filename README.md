@@ -1,6 +1,6 @@
 # Telegram Subscription Bot
 
-This Telegram bot automatically fetches new subscription links from specified Telegram channels, categorizes them, and pushes them to a GitHub repository. It's designed to be run by individual users via GitHub Actions.
+This Telegram bot automatically fetches V2Ray, Trojan, Shadowsocks, and other proxy links from specified Telegram channels. It then categorizes these links and generates subscription files suitable for various clients and tools, including Hiddify, NPV Tunnel, ClashMeta, and general Xray-compatible applications. The bot pushes these generated files to a user-configured GitHub repository and is designed to be run by individual users via GitHub Actions.
 
 ## Project Structure
 
@@ -82,7 +82,7 @@ In your forked **bot repository** (the one you created in Step 1), you need to s
 
 ### 6. Prepare Your Subscription Repository
 
-Create the repository on GitHub that you specified as `DEFAULT_REPO` (e.g., `yourusername/my-subscription-links`). This can be a private or public repository. The bot will clone this repository, add files to a `data/subs/` directory, and push changes. It's crucial this repository exists.
+Create **your own personal or dedicated** repository on GitHub that you specified as `DEFAULT_REPO` (e.g., `yourusername/my-subscription-links`). This will be **your subscription repository**. It can be private or public. The bot will clone this repository, add files to a `data/subs/` directory, and push changes. It's crucial this repository exists.
 
 ### 7. Start Interacting with Your Bot
 
@@ -113,34 +113,41 @@ Create the repository on GitHub that you specified as `DEFAULT_REPO` (e.g., `you
     *   The GitHub Action defined in `.github/workflows/update.yml` runs on a schedule (default: every 6 hours) or when manually dispatched.
     *   **Checkout**: It checks out the latest code of your **bot repository**.
     *   **Setup**: It sets up Python and installs dependencies from `requirements.txt`.
-    *   **Run Bot Logic**: It executes `python bot.py` using the `BOT_TOKEN`, `GITHUB_TOKEN`, and `DEFAULT_REPO` secrets from your bot repository.
-        *   **Important Note on `bot.py` Execution in GitHub Actions**:
-            *   The current `bot.py` executes `dp.start_polling(bot)`, which is designed for a continuously running bot that listens for incoming Telegram messages.
-            *   When run in a GitHub Action, the script will start, initialize the poller, and then the Action will likely complete or timeout. It **will not** proactively update subscriptions for all users based on the schedule alone unless a message happens to arrive and be processed during the brief execution window of the Action.
-            *   **For the GitHub Action to reliably update subscriptions on schedule**: `bot.py` needs to be modified, or (more ideally) a separate script needs to be created and called by the Action. This dedicated script should:
-                1.  Not start the Telegram poller.
-                2.  Load all user configurations from `data/users.json`.
-                3.  For each configured user and their channels:
-                    a.  Initialize a `Bot` instance: `bot_instance = Bot(token=os.getenv("BOT_TOKEN"))`. (Note: `Bot` should be imported from `aiogram`).
-                    b.  Fetch posts using `await fetch_channel_posts(bot_instance, channel_name, limit=50)`. (Ensure `fetch_channel_posts` is awaitable and used with `await`).
-                    c.  Extract links: `all_links_for_user = []`, then loop through posts and `all_links_for_user.extend(extract_links(post_text))`.
-                    d.  Deduplicate links: `unique_links = list(set(all_links_for_user))`.
-                    e.  Call `update_subscriptions(user_id, unique_links)`. This function is synchronous, so it's fine as is.
-                4.  The main function of this script should be `async` and use `asyncio.run()` if calling async functions.
-                5.  The script should then exit after processing all users.
-4.  **Subscription Fetching and Processing**:
-    *   `core/services/extractor.py`: Fetches recent messages from the specified channels and extracts all URI links.
-    *   `core/services/builder.py`: Categorizes these links based on their protocol (vmess, vless, trojan, ss, etc.) and creates separate text files for each category (e.g., `v2rayNG.txt`, `hiddify.txt`). These files are named based on `FORMAT_MAP` keys.
+    *   **Run Update Script**: It executes `python scheduled_update.py` (located in the root of the bot repository) using the `BOT_TOKEN`, `GITHUB_TOKEN`, and `DEFAULT_REPO` secrets. This script is specifically designed for non-interactive, scheduled execution:
+        *   It loads all user configurations from `data/users.json`.
+        *   For each user, it fetches links from all their subscribed channels.
+        *   It then calls the necessary services to build and upload the subscription files to the user's designated GitHub repository.
+4.  **Subscription Fetching, Processing, and File Generation**:
+    *   `core/services/extractor.py`: Fetches recent messages from the specified Telegram channels and extracts all URI (Uniform Resource Identifier) links.
+    *   `core/services/builder.py`: Takes the extracted links and categorizes them based on their protocol (e.g., `vmess://`, `vless://`, `trojan://`, `ss://`). It then generates several `.txt` files in the `data/subs/` directory of your target subscription repository:
+        *   **Protocol-specific files**:
+            *   `vmess.txt`: Contains only VMESS links.
+            *   `vless.txt`: Contains only VLESS links. (Primarily for Hiddify, but usable by other Xray clients)
+            *   `trojan.txt`: Contains only Trojan links. (For NPV Tunnel and other clients)
+            *   `shadowsocks.txt`: Contains only Shadowsocks (ss://) links.
+            *   `shadowsocksr.txt`: Contains only ShadowsocksR (ssr://) links.
+            *   `tuic.txt`: Contains only TUIC links.
+            *   `hysteria.txt`: Contains only Hysteria (v1) links.
+            *   `hysteria2.txt`: Contains only Hysteria2 (hy2://) links.
+        *   **Aggregated file**:
+            *   `all_proxies.txt`: Contains all unique links that were successfully identified and categorized from the known protocols listed above. This file is useful for clients like ClashMeta or any tool that can consume a list of mixed proxy types.
+        *   **Fallback file**:
+            *   `clashMetaCore.txt`: Contains any links that did not match the explicitly defined protocols in `FORMAT_MAP`. This can be useful for experimental or less common link types.
+    *   **Client Compatibility**:
+        *   **Hiddify**: Primarily use `vless.txt`. Hiddify apps can often import other types as well.
+        *   **NPV Tunnel**: Use `trojan.txt`.
+        *   **Xray-compatible clients** (e.g., V2RayN, NekoBox, Streisand, etc.): Use the specific protocol files (`vmess.txt`, `vless.txt`, `trojan.txt`, `shadowsocks.txt`) as needed.
+        *   **ClashMeta**: Use `all_proxies.txt` for a comprehensive list, or combine specific protocol files. The individual files can also be used as separate proxy providers in Clash.
+
 5.  **Pushing to GitHub (Subscription Repository)**:
-    *   `core/services/uploader.py`:
-        *   Clones the user's target subscription repository (defined by `DEFAULT_REPO` or user-specific settings if implemented and present in `users.json`) into a temporary directory. It uses the `GITHUB_TOKEN` for authentication.
-        *   Places the generated subscription files into a `data/subs/` directory within the cloned repository.
-        *   Commits and pushes any changes to the subscription repository.
+    *   `core/services/uploader.py`: This service handles the Git operations.
+        *   It clones your target subscription repository (e.g., `yourusername/my-subs-repo` specified in `DEFAULT_REPO` or user settings) into a temporary directory using the `GITHUB_TOKEN` (your Personal Access Token) for authentication over HTTPS.
+        *   It places the newly generated subscription files (e.g., `vmess.txt`, `all_proxies.txt`) into the `data/subs/` directory within this cloned repository. If these files already exist, they are overwritten with the latest links.
+        *   It then uses Git commands to add any changes, commit them with a timestamp, and push them back to your subscription repository.
 
 ## Important Considerations & Current Limitations
 
-*   **GitHub Action Execution Mode for Scheduled Updates**: As highlighted multiple times, the current `bot.py` is not suitable for non-interactive scheduled execution in GitHub Actions. A dedicated script for batch updates is strongly recommended for the scheduled task to work as intended.
-    *   **Recommendation**: Create a script (e.g., `run_scheduled_updates.py`). This script would iterate through users in `data/users.json` and perform the update logic as described in point 3 under "How it Works". Modify `.github/workflows/update.yml` to run `python run_scheduled_updates.py` instead of `python bot.py`.
+*   **GitHub Action Execution**: The scheduled updates are handled by `scheduled_update.py`, which is designed for this purpose. The `bot.py` script is for interactive Telegram polling only.
 *   **Error Handling**: The `subprocess.run` calls in `uploader.py` use `check=True`. This is good for stopping on errors, but more specific error handling (e.g., logging failures for specific channels, or if a GitHub push fails) and potentially notifying the user via Telegram would improve robustness.
 *   **GitHub API for `/status`**: The `/status` command's `get_action_status` function in `core/handlers/github.py` is a placeholder. A full implementation would need to query the GitHub API for the status of workflow runs in the bot repository.
 *   **User-Specific GitHub Configuration via Bot**: The handlers for setting custom GitHub repository/token per user are not implemented. Users must rely on the `DEFAULT_REPO` secret for now.
