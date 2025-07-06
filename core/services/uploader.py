@@ -1,99 +1,112 @@
-import os, subprocess, tempfile
+import os
+import subprocess
+import tempfile
+import logging
+import asyncio
 from datetime import datetime
+
 from core.utils.config import GITHUB_TOKEN, DEFAULT_REPO
 from core.utils.userdb import get_user
+from core.services.builder import build_sub_files # Ensure this is correctly imported
 
-def update_subscriptions(user_id: int, links: list[str]):
-    user = get_user(user_id)
+# Setup logger for this module
+logger = logging.getLogger(__name__)
+
+async def run_git_command(cmd: list[str], cwd: str = None, check: bool = True) -> subprocess.CompletedProcess:
+    """Helper function to run git commands asynchronously."""
+    process = await asyncio.to_thread(
+        subprocess.run,
+        cmd,
+        capture_output=True,
+        text=True,
+        cwd=cwd,
+        check=check # Will raise CalledProcessError if check is True and command fails
+    )
+    return process
+
+async def update_subscriptions(user_id: int, links: list[str]) -> bool:
+    """
+    Clones the user's repository, builds subscription files, and pushes changes.
+    Returns True on success, False on failure.
+    """
+    user = get_user(user_id) # This is synchronous, consider if userdb needs async methods if it becomes a bottleneck
     repo_name = user.get('repo_name') or DEFAULT_REPO
-    token = user.get('github_token') or GITHUB_TOKEN # User specific token takes precedence
+    # User specific token takes precedence if available, otherwise use the global GITHUB_TOKEN
+    # Ensure that if user.get('github_token') is an empty string, it falls back to GITHUB_TOKEN
+    token = user.get('github_token') if user.get('github_token') else GITHUB_TOKEN
+
 
     if not repo_name:
-        # logging.error(f"User {user_id}: Repository name not configured.")
-        print(f"User {user_id}: Repository name not configured.") # Placeholder for logging
-        return
+        logger.error(f"User {user_id}: Repository name not configured.")
+        return False
     if not token:
-        # logging.error(f"User {user_id}: GitHub token not configured.")
-        print(f"User {user_id}: GitHub token not configured.") # Placeholder for logging
-        return
+        logger.error(f"User {user_id}: GitHub token not configured (neither user-specific nor global).")
+        return False
 
-    # Construct repo_url: token should be part of it for https cloning if it's a PAT
-    # The format is https://<token>@github.com/<username>/<repo>.git
-    # Or, if SSH is used, it's different, but PATs are typically for HTTPS.
-    # Assuming repo_name is in format "username/reponame"
     repo_url = f"https://{token}@github.com/{repo_name}.git"
-    # If repo_name already includes user (e.g. from DEFAULT_REPO which might be full name)
-    # this might result in https://TOKEN@github.com/OWNER/REPO.git which is correct.
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        try:
-            # Clone the specific branch if specified, otherwise default branch
-            # For simplicity, let's assume default branch for now.
-            # Consider shallow clone if history is not needed: --depth 1
-            subprocess.run(['git','clone','--depth','1', repo_url, tmpdir], check=True, capture_output=True, text=True)
-            # logging.info(f"User {user_id}: Cloned {repo_name} to {tmpdir}")
-            print(f"User {user_id}: Cloned {repo_name} to {tmpdir}")
-        except subprocess.CalledProcessError as e:
-            # logging.error(f"User {user_id}: Failed to clone {repo_name}. Error: {e.stderr}")
-            print(f"User {user_id}: Failed to clone {repo_name}. Error: {e.stderr}")
-            return
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logger.info(f"User {user_id}: Cloning {repo_name} into {tmpdir}")
+            try:
+                await run_git_command(['git', 'clone', '--depth', '1', repo_url, tmpdir], cwd=None)
+                logger.info(f"User {user_id}: Successfully cloned {repo_name}.")
+            except subprocess.CalledProcessError as e:
+                logger.error(f"User {user_id}: Failed to clone {repo_name}. Error: {e.stderr}")
+                return False
 
-        # Define the output directory for subscription files within the cloned repo
-        # Standardizing to 'subs/' or 'subscriptions/' inside the data_dir is good.
-        # The README mentions 'data/subs/'
-        subs_output_dir = os.path.join(tmpdir, 'data', 'subs')
-        os.makedirs(subs_output_dir, exist_ok=True)
+            subs_output_dir = os.path.join(tmpdir, 'data', 'subs')
+            os.makedirs(subs_output_dir, exist_ok=True)
 
-        # build files using the builder service
-        from core.services.builder import build_sub_files # Local import to avoid circular deps if any
-        build_sub_files(links, subs_output_dir)
-        # logging.info(f"User {user_id}: Subscription files built in {subs_output_dir}")
-        print(f"User {user_id}: Subscription files built in {subs_output_dir}")
+            logger.info(f"User {user_id}: Building subscription files in {subs_output_dir}")
+            # build_sub_files itself is synchronous. If it becomes I/O bound or very CPU intensive,
+            # it might also need to be run in a thread. For now, assuming it's acceptable.
+            try:
+                # This function needs to be robust.
+                # It should create files based on the links provided.
+                build_sub_files(links, subs_output_dir)
+                logger.info(f"User {user_id}: Subscription files built.")
+            except Exception as e:
+                logger.error(f"User {user_id}: Error building subscription files: {e}", exc_info=True)
+                return False
 
-        # Check for changes using git status
-        status_result = subprocess.run(['git','-C', tmpdir, 'status', '--porcelain'], check=True, capture_output=True, text=True)
-        if not status_result.stdout.strip():
-            # logging.info(f"User {user_id}: No changes to commit in {repo_name}.")
-            print(f"User {user_id}: No changes to commit in {repo_name}.")
-            return
 
-        # Add, commit, and push changes
-        try:
-            # Configure git user for commit, can be generic
-            subprocess.run(['git','-C', tmpdir, 'config', 'user.name', 'Telegram Subscription Bot'], check=True)
-            subprocess.run(['git','-C', tmpdir, 'config', 'user.email', 'bot@example.com'], check=True)
+            try:
+                status_result = await run_git_command(['git', 'status', '--porcelain'], cwd=tmpdir)
+                if not status_result.stdout.strip():
+                    logger.info(f"User {user_id}: No changes to commit in {repo_name}.")
+                    # Even if no changes, we can consider it a "successful" run in terms of processing
+                    # The notification logic can distinguish between "updated" and "no changes".
+                    return True
+            except subprocess.CalledProcessError as e:
+                logger.error(f"User {user_id}: Failed to get git status for {repo_name}. Error: {e.stderr}")
+                return False
 
-            subprocess.run(['git','-C', tmpdir, 'add', '.'], check=True)
-            commit_message = f"Update subscription files - {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
-            subprocess.run(['git','-C', tmpdir, 'commit', '-m', commit_message], check=True, capture_output=True, text=True)
-            # logging.info(f"User {user_id}: Committed changes to {repo_name} with message: {commit_message}")
-            print(f"User {user_id}: Committed changes to {repo_name} with message: {commit_message}")
+            logger.info(f"User {user_id}: Changes detected. Proceeding with commit and push for {repo_name}.")
+            try:
+                await run_git_command(['git', 'config', 'user.name', 'Telegram Subscription Bot'], cwd=tmpdir)
+                await run_git_command(['git', 'config', 'user.email', 'bot@example.com'], cwd=tmpdir)
+                await run_git_command(['git', 'add', '.'], cwd=tmpdir)
 
-            # Push to the default branch (usually main or master)
-            subprocess.run(['git','-C', tmpdir, 'push'], check=True, capture_output=True, text=True)
-            # logging.info(f"User {user_id}: Successfully pushed changes to {repo_name}")
-            print(f"User {user_id}: Successfully pushed changes to {repo_name}")
+                commit_message = f"Update subscription files - {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                await run_git_command(['git', 'commit', '-m', commit_message], cwd=tmpdir)
+                logger.info(f"User {user_id}: Committed changes with message: \"{commit_message}\"")
 
-        except subprocess.CalledProcessError as e:
-            # logging.error(f"User {user_id}: Git operation failed for {repo_name}. Error: {e.stderr}")
-            # Consider logging e.stdout as well for more context
-            print(f"User {user_id}: Git operation failed for {repo_name}. Error: {e.stderr}")
-        except Exception as e:
-            # logging.error(f"User {user_id}: An unexpected error occurred during git operations for {repo_name}: {e}")
-            print(f"User {user_id}: An unexpected error occurred during git operations for {repo_name}: {e}")
+                await run_git_command(['git', 'push'], cwd=tmpdir)
+                logger.info(f"User {user_id}: Successfully pushed changes to {repo_name}")
+                return True
+            except subprocess.CalledProcessError as e:
+                logger.error(f"User {user_id}: Git operation (commit/push) failed for {repo_name}. Error: {e.stderr}")
+                if "remote end hung up unexpectedly" in e.stderr or "TLS_ERROR" in e.stderr:
+                     logger.error(f"User {user_id}: This might be a TLS/SSL issue with git. Ensure libssl is up to date on the runner or system.")
+                return False
+            except Exception as e: # Catch any other unexpected errors during git operations
+                logger.error(f"User {user_id}: An unexpected error occurred during git operations for {repo_name}: {e}", exc_info=True)
+                return False
 
-# Placeholder for get_action_status - to be implemented or removed
-# def get_action_status(user_id: int) -> str:
-# user = get_user(user_id)
-# repo_name = user.get('repo_name') or DEFAULT_REPO
-# token = user.get('github_token') or GITHUB_TOKEN
-# if not repo_name:
-# return "Repository not configured."
-#    # This would involve making API calls to GitHub
-#    # e.g., using the 'requests' library and the GitHub Actions API
-#    # https://docs.github.com/en/rest/actions/workflow-runs?apiVersion=2022-11-28
-#    # Needs error handling, parsing response, etc.
-# return f"Fetching status for {repo_name} is not yet implemented."
-```
+    except Exception as e: # Catch errors related to TemporaryDirectory or other setup
+        logger.error(f"User {user_id}: A critical error occurred in update_subscriptions for {repo_name}: {e}", exc_info=True)
+        return False
 
-The initial content provided in the prompt for `uploader.py` was minimal. I've fleshed it out above based on the requirements and common practices for such a script. I will use this more detailed version for the `create_file_with_block` call.
+# Note: The placeholder for get_action_status was removed as it's not directly part of uploader's core responsibility.
+# That logic would typically reside in a handler or a separate GitHub API interaction module.
