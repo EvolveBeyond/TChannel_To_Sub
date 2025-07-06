@@ -6,32 +6,44 @@ This Telegram bot automatically fetches new subscription links from specified Te
 
 ```
 telegram-sub-bot/
-├── bot.py                      # Bot entrypoint
+├── bot.py                      # Main bot entrypoint (handles polling and can trigger updates)
+├── run_scheduled_updates.py    # Script for non-interactive subscription updates (used by GitHub Actions)
 ├── requirements.txt            # Python dependencies
-├── .env.example                # Template for environment variables
+├── .env.example                # Template for environment variables for local development
 ├── README.md                   # This file
+├── .gitignore                  # Specifies intentionally untracked files that Git should ignore
 ├── data/
-│   ├── users.json              # Per-user settings (channels, tokens, repo) - created automatically
-│   └── subs/                   # Generated subscription files - created automatically in your target repo
+│   └── users.json              # Stores user configurations (Telegram ID, channels, optional repo/token)
 ├── core/
-│   ├── handlers/               # Telegram handlers
-│   │   ├── start.py            # /start and main menu
-│   │   ├── github.py           # GitHub settings and status
-│   │   ├── channels.py         # /tch command for managing channels
-│   │   └── notify.py           # Notify user when subs update (placeholder)
-│   ├── services/               # Business logic
-│   │   ├── extractor.py        # Fetch and parse channel posts
-│   │   ├── builder.py          # Build subs in all formats dynamically
-│   │   └── uploader.py         # Clone, commit, push to GitHub
-│   └── utils/                  # Low-level utilities
-│       ├── userdb.py           # Persist and retrieve user data
-│       └── config.py           # Load environment variables
+│   ├── handlers/               # Telegram command handlers
+│   │   ├── start.py            # Handles /start command
+│   │   ├── channels.py         # Handles /tch command (add, remove, list channels)
+│   │   ├── github.py           # Handles /status command (placeholder for GitHub Action status)
+│   │   └── notify.py           # Module for sending notifications to users
+│   ├── services/               # Core business logic
+│   │   ├── extractor.py        # (To be implemented) Fetches posts and extracts links from channels
+│   │   ├── builder.py          # (To be implemented) Builds subscription files from links
+│   │   └── uploader.py         # Clones, updates, and pushes to the user's GitHub subscription repository
+│   └── utils/                  # Utility modules
+│       ├── userdb.py           # Manages persistence and retrieval of user data from users.json
+│       └── config.py           # Loads configuration from environment variables and .env file
 └── .github/
     └── workflows/
-        └── update.yml         # GitHub Actions: schedule and dispatch
+        └── update.yml          # GitHub Actions workflow for scheduled and manual subscription updates
 ```
 
-## How to Use
+## Local Development
+
+For local development or running the bot outside of GitHub Actions:
+1.  Clone your forked repository.
+2.  Create a virtual environment: `python -m venv venv` and activate it (`source venv/bin/activate` or `venv\Scripts\activate` on Windows).
+3.  Install dependencies: `pip install -r requirements.txt`.
+4.  Create a `.env` file in the project root by copying `.env.example`.
+5.  Fill in your `BOT_TOKEN`, `GITHUB_TOKEN`, and `DEFAULT_REPO` in the `.env` file.
+6.  To run the bot in polling mode (listening for Telegram commands): `python bot.py`
+7.  To test the update script locally (simulating an Action run): `python bot.py run_updates`
+
+## How to Use (for GitHub Actions Setup)
 
 To run this bot for yourself, follow these steps:
 
@@ -95,56 +107,50 @@ Create the repository on GitHub that you specified as `DEFAULT_REPO` (e.g., `you
 *   `/start`: Displays a welcome message and lists available commands.
 *   `/tch @ChannelNameOrLink`: Adds or removes a Telegram channel to fetch subscription links from.
     *   Examples: `/tch @myawesomesubs` or `/tch https://t.me/publicchannelname`
-    *   When you add a channel, the bot will immediately try to fetch links from the last 50 posts and update your subscription repository (if `DEFAULT_REPO` and `GITHUB_TOKEN` are correctly set up).
-*   `/status`: Shows the status of the last GitHub Action run.
-    *   *Note: The function `get_action_status` in `core/handlers/github.py` is a placeholder. For this to work, it needs to be implemented to fetch actual GitHub Actions workflow run status using the GitHub API. This would likely involve querying workflow runs in your bot repository or inspecting commit history in the target subscription repository.*
-*   **Configuration Commands (Currently reliant on `DEFAULT_REPO` secret)**:
-    *   The system is designed to potentially store user-specific GitHub repository names and tokens in `data/users.json` (see `core/utils/userdb.py`).
-    *   However, the Telegram command handlers in `core/handlers/github.py` do not currently include commands for users to *set* these details (e.g., `/setrepo yourusername/your-subs-repo` or `/settoken <your_pat>`).
-    *   Therefore, configuration **must currently be done using the `DEFAULT_REPO` GitHub Action secret**.
+    *   Examples: `/tch @myawesomesubs` or `/tch https://t.me/publicchannelname`
+    *   You can also use `/tch list` to see your current channels and `/tch remove @channel` to remove one.
+*   `/status`: Shows a placeholder message for the status of the last GitHub Action run.
+    *   *Note: A full implementation for `/status` to show real-time GitHub Actions status would require GitHub API integration and is not yet implemented.*
+*   **Configuration Commands (Reliance on GitHub Secrets)**:
+    *   User-specific GitHub repository names or tokens are not currently configurable via bot commands.
+    *   All GitHub-related configurations (target repository, access token) **must be set via GitHub Secrets** (`DEFAULT_REPO`, `GITHUB_TOKEN`) in your forked bot repository.
 
 ## How it Works
 
-1.  **User Interaction (Telegram)**: You interact with your bot on Telegram using commands like `/start` and `/tch`.
-2.  **Data Storage (`data/users.json`)**:
-    *   When you use `/tch`, your Telegram user ID and the list of your specified channels are saved in `data/users.json`. This file is located in the `data/` directory within the **bot's repository** (the one you forked).
-    *   This `users.json` file is used by the GitHub Action to know which channels to process.
-3.  **Scheduled Updates (GitHub Actions)**:
-    *   The GitHub Action defined in `.github/workflows/update.yml` runs on a schedule (default: every 6 hours) or when manually dispatched.
-    *   **Checkout**: It checks out the latest code of your **bot repository**.
-    *   **Setup**: It sets up Python and installs dependencies from `requirements.txt`.
-    *   **Run Bot Logic**: It executes `python bot.py` using the `BOT_TOKEN`, `GITHUB_TOKEN`, and `DEFAULT_REPO` secrets from your bot repository.
-        *   **Important Note on `bot.py` Execution in GitHub Actions**:
-            *   The current `bot.py` executes `dp.start_polling(bot)`, which is designed for a continuously running bot that listens for incoming Telegram messages.
-            *   When run in a GitHub Action, the script will start, initialize the poller, and then the Action will likely complete or timeout. It **will not** proactively update subscriptions for all users based on the schedule alone unless a message happens to arrive and be processed during the brief execution window of the Action.
-            *   **For the GitHub Action to reliably update subscriptions on schedule**: `bot.py` needs to be modified, or (more ideally) a separate script needs to be created and called by the Action. This dedicated script should:
-                1.  Not start the Telegram poller.
-                2.  Load all user configurations from `data/users.json`.
-                3.  For each configured user and their channels:
-                    a.  Initialize a `Bot` instance: `bot_instance = Bot(token=os.getenv("BOT_TOKEN"))`. (Note: `Bot` should be imported from `aiogram`).
-                    b.  Fetch posts using `await fetch_channel_posts(bot_instance, channel_name, limit=50)`. (Ensure `fetch_channel_posts` is awaitable and used with `await`).
-                    c.  Extract links: `all_links_for_user = []`, then loop through posts and `all_links_for_user.extend(extract_links(post_text))`.
-                    d.  Deduplicate links: `unique_links = list(set(all_links_for_user))`.
-                    e.  Call `update_subscriptions(user_id, unique_links)`. This function is synchronous, so it's fine as is.
-                4.  The main function of this script should be `async` and use `asyncio.run()` if calling async functions.
-                5.  The script should then exit after processing all users.
-4.  **Subscription Fetching and Processing**:
-    *   `core/services/extractor.py`: Fetches recent messages from the specified channels and extracts all URI links.
-    *   `core/services/builder.py`: Categorizes these links based on their protocol (vmess, vless, trojan, ss, etc.) and creates separate text files for each category (e.g., `v2rayNG.txt`, `hiddify.txt`). These files are named based on `FORMAT_MAP` keys.
-5.  **Pushing to GitHub (Subscription Repository)**:
-    *   `core/services/uploader.py`:
-        *   Clones the user's target subscription repository (defined by `DEFAULT_REPO` or user-specific settings if implemented and present in `users.json`) into a temporary directory. It uses the `GITHUB_TOKEN` for authentication.
-        *   Places the generated subscription files into a `data/subs/` directory within the cloned repository.
-        *   Commits and pushes any changes to the subscription repository.
+1.  **User Interaction (Telegram)**: You interact with your bot on Telegram using commands like `/start` and `/tch`. Your Telegram user ID and chosen channels are stored in `data/users.json` within the bot's repository.
+2.  **Scheduled/Manual Updates (GitHub Actions)**:
+    *   The GitHub Action defined in `.github/workflows/update.yml` runs on a schedule (default: every 12 hours) or can be manually dispatched from the Actions tab of your bot repository.
+    *   **Checkout & Setup**: The workflow checks out the bot's code and sets up the Python environment, installing dependencies from `requirements.txt`.
+    *   **Run Update Script**: It executes `python bot.py run_updates`. This command tells `bot.py` to invoke the `main()` function from `run_scheduled_updates.py`.
+3.  **`run_scheduled_updates.py` Logic**:
+    *   This script is the core of the automated update process. It does *not* start the Telegram poller.
+    *   It loads all user configurations from `data/users.json`.
+    *   For each user and their specified channels:
+        *   It initializes an `aiogram.Bot` instance using the `BOT_TOKEN` secret.
+        *   **Fetch & Extract**: It calls `core.services.extractor.py` (to be implemented) to fetch recent posts from channels and extract subscription links.
+        *   **Build Subscriptions**: It calls `core.services.builder.py` (to be implemented) to categorize the extracted links and generate subscription files in various formats (e.g., plain text lists for different protocols).
+        *   **Upload to GitHub**: It calls `core.services.uploader.py` (`update_subscriptions` function) which:
+            *   Clones the user's target subscription repository (defined by `DEFAULT_REPO` or user-specific settings if ever implemented, using `GITHUB_TOKEN`).
+            *   Places the newly generated subscription files into a `data/subs/` directory within the cloned repository.
+            *   Commits and pushes any changes.
+        *   **Notify User**: After a successful update (or if no new links were found), it uses `core.handlers.notify.py` to send a status message to the user on Telegram.
+    *   The script exits after processing all users.
+4.  **`core/services/uploader.py` in Detail**:
+    *   Uses `asyncio.to_thread` to run `git` commands non-blockingly.
+    *   Manages cloning, committing, and pushing to the target repository specified by `DEFAULT_REPO` (or user-specific settings if available) using the `GITHUB_TOKEN`.
+    *   Subscription files are placed in a `data/subs/` directory in the target repository.
 
-## Important Considerations & Current Limitations
+## Important Considerations & Current Status
 
-*   **GitHub Action Execution Mode for Scheduled Updates**: As highlighted multiple times, the current `bot.py` is not suitable for non-interactive scheduled execution in GitHub Actions. A dedicated script for batch updates is strongly recommended for the scheduled task to work as intended.
-    *   **Recommendation**: Create a script (e.g., `run_scheduled_updates.py`). This script would iterate through users in `data/users.json` and perform the update logic as described in point 3 under "How it Works". Modify `.github/workflows/update.yml` to run `python run_scheduled_updates.py` instead of `python bot.py`.
-*   **Error Handling**: The `subprocess.run` calls in `uploader.py` use `check=True`. This is good for stopping on errors, but more specific error handling (e.g., logging failures for specific channels, or if a GitHub push fails) and potentially notifying the user via Telegram would improve robustness.
-*   **GitHub API for `/status`**: The `/status` command's `get_action_status` function in `core/handlers/github.py` is a placeholder. A full implementation would need to query the GitHub API for the status of workflow runs in the bot repository.
-*   **User-Specific GitHub Configuration via Bot**: The handlers for setting custom GitHub repository/token per user are not implemented. Users must rely on the `DEFAULT_REPO` secret for now.
-*   **Initial `users.json`**: The `data/users.json` file is created if it doesn't exist but starts empty. The first interaction via `/tch` for any user will create their entry.
-*   **Security of `data/users.json`**: This file, containing Telegram user IDs and their subscribed channel list, is stored within your bot's repository. If this repository is public, this information will be public. It does *not* (and should not) store GitHub tokens.
+*   **Core Logic Implementation Status**:
+    *   `core/services/extractor.py`: Logic for fetching posts and extracting links is **to be implemented**.
+    *   `core/services/builder.py`: Logic for building various subscription file formats is **to be implemented**.
+    *   The overall workflow for scheduled updates depends on the completion of these modules.
+*   **GitHub Action Execution**: The setup with `bot.py run_updates` calling `run_scheduled_updates.py` is designed for efficient execution in GitHub Actions, avoiding the start of the Telegram poller.
+*   **Error Handling**: Basic error handling is in place in `uploader.py` and `run_scheduled_updates.py`. This can be further improved with more specific error reporting and user notifications for critical failures.
+*   **`/status` Command**: Currently provides a static message. Real-time status requires GitHub API integration.
+*   **User-Specific GitHub Configuration**: The bot currently relies on `DEFAULT_REPO` and `GITHUB_TOKEN` secrets for all users. Storing and using per-user GitHub tokens or repository names via bot commands is not implemented and would require careful security considerations for token storage.
+*   **Security of `data/users.json`**: This file contains Telegram user IDs and their channel lists. If your bot repository is public, this data will also be public. It does *not* (and should not) store GitHub tokens.
+*   **Idempotency**: The update process should ideally be idempotent, meaning running it multiple times with the same input should produce the same result in the target repository without causing errors or duplicate entries (e.g., `uploader.py` checks for actual changes before committing).
 
-By forking this repository and following these setup instructions, you can automate the process of collecting and organizing your Telegram subscription links. Remember to review the "Important Considerations" for potential improvements, especially regarding the GitHub Action execution logic for scheduled updates.
+By forking this repository and following these setup instructions, you can automate the process of collecting and organizing your Telegram subscription links. Development is ongoing, particularly for the link extraction and subscription building services.
